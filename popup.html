@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <div class="logo">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+        <circle cx="12" cy="12" r="9"></circle>
+        <path d="M5.6 5.6l12.8 12.8"></path>
+      </svg>
+    </div>
+    <div class="titles">
+      <h1>Block Reposters</h1>
+      <p>pour X</p>
+    </div>
+    <span id="pill" class="pill idle">Prêt</span>
+  </header>
+
+  <main>
+    <button id="main" class="primary">
+      <span id="mainLabel">Bloquer tous les reposteurs</span>
+      <small>Collecte + blocage automatique</small>
+    </button>
+
+    <section class="progress" id="progressBox" hidden>
+      <div class="bar"><div id="barFill"></div></div>
+      <div class="bar-label"><span id="pct">0%</span><span id="eta"></span></div>
+    </section>
+
+    <section class="stats">
+      <div class="card"><b id="sQueue">0</b><span>En attente</span></div>
+      <div class="card ok"><b id="sDone">0</b><span>Bloqués</span></div>
+      <div class="card"><b id="sSkip">0</b><span>Ignorés</span></div>
+    </section>
+
+    <div class="row">
+      <button id="toggle" class="ghost">Pause</button>
+      <button id="clear" class="ghost danger">Vider</button>
+    </div>
+
+    <details>
+      <summary>Réglages</summary>
+      <label>Vitesse
+        <select id="speed">
+          <option value="safe">Prudente (6–12 s)</option>
+          <option value="normal">Normale (3–7 s)</option>
+          <option value="fast">Rapide (1,5–3,5 s)</option>
+        </select>
+      </label>
+      <label>Limite par session
+        <input id="limit" type="number" min="1" value="200" />
+      </label>
+      <label>Liste blanche <em>(un @pseudo par ligne)</em>
+        <textarea id="whitelist" rows="3" placeholder="ami1&#10;ami2"></textarea>
+      </label>
+      <button id="save" class="ghost">Enregistrer</button>
+    </details>
+
+    <div id="msg"></div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
