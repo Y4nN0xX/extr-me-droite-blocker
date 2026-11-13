@@ -1,11 +1,10 @@
-// Block Reposters for X - content script
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const rand = (a, b) => a + Math.random() * (b - a);
+const MIN_LIMIT = 1000;
 
 const DELAYS = {
   safe: [6000, 12000],
   normal: [3000, 7000],
   fast: [1500, 3500],
+  ultra: [450, 550],
 };
 
 const DEFAULTS = {
@@ -16,145 +15,177 @@ const DEFAULTS = {
   done: 0,
   skipped: 0,
   whitelist: [],
-  limit: 200,
+  limit: MIN_LIMIT,
   session: 0,
   speed: "normal",
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const rand = (min, max) => min + Math.random() * (max - min);
 const getState = () => chrome.storage.local.get(DEFAULTS);
-const setState = (o) => chrome.storage.local.set(o);
+const setState = (values) => chrome.storage.local.set(values);
+const getLimit = (state) => Math.max(MIN_LIMIT, Number(state.limit) || MIN_LIMIT);
+const getDelay = (speed) => {
+  const [min, max] = DELAYS[speed] || DELAYS.normal;
+  return rand(min, max);
+};
 
-function waitFor(selector, timeout = 8000) {
+function waitFor(selector, timeout = 8000, interval = 100) {
   return new Promise((resolve) => {
-    const t0 = Date.now();
+    const start = Date.now();
     const tick = () => {
       const el = document.querySelector(selector);
       if (el) return resolve(el);
-      if (Date.now() - t0 > timeout) return resolve(null);
-      setTimeout(tick, 150);
+      if (Date.now() - start > timeout) return resolve(null);
+      setTimeout(tick, interval);
     };
     tick();
   });
 }
 
 function myHandle() {
-  const a = document.querySelector('[data-testid="AppTabBar_Profile_Link"]');
-  return a ? a.getAttribute("href").replace("/", "").toLowerCase() : null;
+  const link = document.querySelector('[data-testid="AppTabBar_Profile_Link"]');
+  const href = link && link.getAttribute("href");
+  return href ? href.replace("/", "").toLowerCase() : null;
 }
 
 const isRepostsPage = () => /\/status\/\d+\/retweets/.test(location.pathname);
 
 function currentProfileHandle() {
-  const m = location.pathname.match(/^\/([A-Za-z0-9_]{1,15})\/?$/);
-  return m ? m[1].toLowerCase() : null;
+  const match = location.pathname.match(/^\/([A-Za-z0-9_]{1,15})\/?$/);
+  return match ? match[1].toLowerCase() : null;
 }
 
-// ---------- 1. Collecte ----------
 async function collect() {
   if (!isRepostsPage()) {
     return { ok: false, error: "Ouvre la page des reposts d'un post (…/status/ID/retweets)." };
   }
+
   await waitFor('[data-testid="UserCell"]', 10000);
+
   const found = new Set();
   let stable = 0;
+
   while (stable < 4) {
     const before = found.size;
     document.querySelectorAll('[data-testid="UserCell"]').forEach((cell) => {
-      const a = cell.querySelector('a[role="link"][href^="/"]');
-      if (!a) return;
-      const h = a.getAttribute("href").split("/")[1];
-      if (h && /^[A-Za-z0-9_]{1,15}$/.test(h)) found.add(h);
+      const link = cell.querySelector('a[role="link"][href^="/"]');
+      if (!link) return;
+      const handle = link.getAttribute("href").split("/")[1];
+      if (handle && /^[A-Za-z0-9_]{1,15}$/.test(handle)) found.add(handle);
     });
     stable = found.size === before ? stable + 1 : 0;
     window.scrollBy(0, window.innerHeight);
     await sleep(650);
   }
-  const st = await getState();
-  const me = myHandle();
-  const skip = new Set([...st.whitelist, me].filter(Boolean).map((s) => s.toLowerCase()));
-  const existing = new Set(st.queue.map((s) => s.toLowerCase()));
-  const added = [...found].filter(
-    (h) => !skip.has(h.toLowerCase()) && !existing.has(h.toLowerCase())
+
+  const state = await getState();
+  const skip = new Set(
+    [...state.whitelist, myHandle()].filter(Boolean).map((s) => s.toLowerCase())
   );
-  await setState({ queue: [...st.queue, ...added] });
+  const existing = new Set(state.queue.map((s) => s.toLowerCase()));
+  const added = [...found].filter((h) => {
+    const key = h.toLowerCase();
+    return !skip.has(key) && !existing.has(key);
+  });
+
+  await setState({ queue: [...state.queue, ...added] });
   return { ok: true, found: found.size, added: added.length };
 }
 
-// ---------- 2. Blocage ----------
 async function blockCurrentProfile() {
-  const menuBtn = await waitFor('[data-testid="userActions"]');
-  if (!menuBtn) return "skipped"; // introuvable, suspendu ou compte qui nous a déjà bloqué
-  menuBtn.click();
-  const blockItem = await waitFor('[data-testid="block"]', 3500);
-  if (!blockItem) {
-    document.body.click();
-    return "skipped"; // déjà bloqué
+  try {
+    const menuButton = await waitFor('[data-testid="userActions"]');
+    if (!menuButton) return "skipped";
+    menuButton.click();
+
+    const blockItem = await waitFor('[data-testid="block"]', 3500);
+    if (!blockItem) {
+      document.body.click();
+      return "skipped";
+    }
+    blockItem.click();
+
+    const confirm = await waitFor('[data-testid="confirmationSheetConfirm"]', 3500);
+    if (!confirm) return "skipped";
+    confirm.click();
+
+    await sleep(400);
+    return "blocked";
+  } catch {
+    return "skipped";
   }
-  blockItem.click();
-  const confirm = await waitFor('[data-testid="confirmationSheetConfirm"]', 3500);
-  if (!confirm) return "skipped";
-  confirm.click();
-  await sleep(500);
-  return "blocked";
+}
+
+async function finish(queueLength) {
+  await setState({ running: false, finished: queueLength === 0, session: 0 });
 }
 
 async function processStep() {
-  const st = await getState();
-  if (!st.running) return;
-  if (st.queue.length === 0 || st.session >= st.limit) {
-    await setState({ running: false, finished: st.queue.length === 0, session: 0 });
-    return;
+  const state = await getState();
+  if (!state.running) return;
+
+  if (state.queue.length === 0 || state.session >= getLimit(state)) {
+    return finish(state.queue.length);
   }
-  const target = st.queue[0];
+
+  const target = state.queue[0];
   if (currentProfileHandle() !== target.toLowerCase()) {
     location.href = `https://x.com/${target}`;
     return;
   }
+
   const result = await blockCurrentProfile();
+
   const fresh = await getState();
-  if (!fresh.running) return; // mis en pause pendant l'opération
+  if (!fresh.running) return;
+
   await setState({
     queue: fresh.queue.slice(1),
     done: fresh.done + (result === "blocked" ? 1 : 0),
     skipped: fresh.skipped + (result === "skipped" ? 1 : 0),
     session: fresh.session + 1,
   });
-  const [min, max] = DELAYS[fresh.speed] || DELAYS.normal;
-  await sleep(rand(min, max));
+
+  await sleep(getDelay(fresh.speed));
+
   const after = await getState();
-  if (after.running && after.queue.length > 0 && after.session < after.limit) {
+  if (after.running && after.queue.length > 0 && after.session < getLimit(after)) {
     location.href = `https://x.com/${after.queue[0]}`;
-  } else {
-    await setState({ running: false, finished: after.queue.length === 0, session: 0 });
+  } else if (after.running) {
+    await finish(after.queue.length);
   }
 }
 
-// ---------- Tout en un : collecte puis blocage automatique ----------
 async function collectAndStart() {
-  const res = await collect();
-  if (!res.ok) return res;
-  const st = await getState();
-  if (st.queue.length === 0) {
+  const result = await collect();
+  if (!result.ok) return result;
+
+  const state = await getState();
+  if (state.queue.length === 0) {
     return { ok: false, error: "Aucun compte à bloquer (liste vide ou tous exclus)." };
   }
+
   await setState({
     running: true,
     finished: false,
-    total: st.queue.length,
+    total: state.queue.length,
     done: 0,
     skipped: 0,
     session: 0,
   });
-  location.href = `https://x.com/${st.queue[0]}`;
-  return { ok: true, found: res.found, queued: st.queue.length };
+
+  location.href = `https://x.com/${state.queue[0]}`;
+  return { ok: true, found: result.found, queued: state.queue.length };
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.type === "collectAndStart") {
-    collectAndStart().then(sendResponse);
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "collectAndStart") {
+    collectAndStart()
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false, error: "Échec de la collecte." }));
     return true;
   }
 });
 
-// Reprise automatique après chaque navigation
-processStep();
+processStep().catch(() => {});
